@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Cube & Ship Combo</title>
+<style>
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: radial-gradient(circle at top, #090914, #050505 70%);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: #e8eeff;
+}
+main {
+  width: min(980px, 95vw);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.7rem;
+}
+h1 {
+  margin: 0;
+  font-size: clamp(1.4rem, 2vw, 2rem);
+  letter-spacing: 0.1rem;
+}
+canvas {
+  width: 100%;
+  height: auto;
+  background: #060606;
+  border: 3px solid #1c2035;
+  border-radius: 14px;
+}
+.controls {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+button {
+  border: none;
+  border-radius: 8px;
+  padding: 0.6rem 1.6rem;
+  font-weight: 600;
+  background: #3b8dff;
+  color: #fff;
+  cursor: pointer;
+}
+.status {
+  font-weight: 600;
+  min-width: 180px;
+}
+small {
+  opacity: 0.8;
+  text-align: center;
+}
+</style>
+</head>
+<body>
+<main>
+  <h1>Jump then Fly</h1>
+  <canvas id="stage" width="900" height="420"></canvas>
+  <div class="controls">
+    <button id="startBtn">Start / Reset</button>
+    <div class="status" id="status">Tap Start</div>
+  </div>
+  <small>Phase 1: Tap to jump over spikes. Phase 2: After finishing, double-tap to transform, then hold to fly through rectangular gaps.</small>
+</main>
+<script>
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const startBtn = document.getElementById("startBtn");
+const statusEl = document.getElementById("status");
+const width = canvas.width;
+const height = canvas.height;
+const groundY = height - 80;
+const cube = { x: 150, y: groundY - 32, size: 32, vy: 0, worldX: 150 };
+const cubeSettings = { speed: 4.8, gravity: 0.63, jump: -12.8 };
+const cubeLength = 1500;
+const spikes = [
+  { x: 360, w: 50, h: 55 },
+  { x: 540, w: 48, h: 65 },
+  { x: 720, w: 48, h: 70 },
+  { x: 900, w: 60, h: 60 },
+  { x: 1100, w: 70, h: 70 },
+  { x: 1300, w: 48, h: 60 }
+];
+const ship = { x: 140, y: height / 2, vy: 0, w: 38, h: 20 };
+const shipSettings = { gravity: 0.28, thrust: 0.58, speed: 3.6 };
+const shipLength = 2200;
+const shipObstacles = [
+  { x: 260, width: 120, gapY: 210, gapH: 130 },
+  { x: 580, width: 130, gapY: 190, gapH: 120 },
+  { x: 880, width: 120, gapY: 230, gapH: 130 },
+  { x: 1180, width: 140, gapY: 200, gapH: 110 },
+  { x: 1480, width: 130, gapY: 210, gapH: 120 },
+  { x: 1760, width: 140, gapY: 205, gapH: 130 },
+  { x: 2060, width: 150, gapY: 190, gapH: 120 }
+];
+let shipDistance = 0;
+let isHolding = false;
+const DOUBLE_TAP_WINDOW = 280;
+let lastTapTime = 0;
+let state = "idle"; // idle, running, over, clear
+let phase = "cube"; // cube, await_ship, ship
+let jumpBuffer = 0;
+const jumpBufferFrames = 8;
+let coyoteFrames = 0;
+const coyoteMax = 6;
+function setStatus(text) {
+  statusEl.textContent = text;
+}
+function resetGame() {
+  state = "idle";
+  phase = "cube";
+  cube.worldX = 150;
+  cube.y = groundY - cube.size;
+  cube.vy = 0;
+  jumpBuffer = 0;
+  coyoteFrames = coyoteMax;
+  shipDistance = 0;
+  ship.y = height / 2;
+  ship.vy = 0;
+  isHolding = false;
+  setStatus("Tap Start");
+}
+function startRun() {
+  if (state !== "idle") return;
+  state = "running";
+  phase = "cube";
+  setStatus("Tap to jump over spikes");
+}
+function beginShipAwait() {
+  phase = "await_ship";
+  setStatus("Double-tap the canvas to transform");
+}
+function enterShipPhase() {
+  phase = "ship";
+  shipDistance = 0;
+  ship.y = height / 2;
+  ship.vy = 0;
+  isHolding = false;
+  setStatus("Hold to rise, release to fall");
+}
+function crash() {
+  if (state !== "running") return;
+  state = "over";
+  setStatus("Crash! Press Start/Reset");
+}
+function clearLevel() {
+  state = "clear";
+  setStatus("Cleared! Press Start to replay");
+}
+function executeCubeJump() {
+  cube.vy = cubeSettings.jump;
+  jumpBuffer = 0;
+  coyoteFrames = 0;
+}
+function isDoubleTap() {
+  const now = performance.now();
+  const doubleTap = now - lastTapTime < DOUBLE_TAP_WINDOW;
+  lastTapTime = now;
+  return doubleTap;
+}
+function handlePointerDown() {
+  const doubleTap = isDoubleTap();
+  if (state === "idle") {
+    startRun();
+    return;
+  }
+  if (state === "over" || state === "clear") {
+    resetGame();
+    return;
+  }
+  if (phase === "await_ship" && doubleTap) {
+    enterShipPhase();
+    return;
+  }
+  if (phase === "cube" && state === "running") {
+    jumpBuffer = jumpBufferFrames;
+    if (coyoteFrames > 0) executeCubeJump();
+    return;
+  }
+  if (phase === "ship" && state === "running") {
+    isHolding = true;
+  }
+}
+function handlePointerUp() {
+  if (phase === "ship") isHolding = false;
+}
+function handleKeyDown(event) {
+  if (event.code === "Space") {
+    event.preventDefault();
+    handlePointerDown();
+    if (phase === "ship" && state === "running") isHolding = true;
+  }
+}
+function handleKeyUp(event) {
+  if (event.code === "Space") {
+    event.preventDefault();
+    handlePointerUp();
+  }
+}
+function updateCubePhase() {
+  cube.worldX += cubeSettings.speed;
+  cube.vy += cubeSettings.gravity;
+  cube.y += cube.vy;
+  const floorY = groundY - cube.size;
+  if (cube.y >= floorY) {
+    cube.y = floorY;
+    cube.vy = 0;
+    coyoteFrames = coyoteMax;
+  } else if (coyoteFrames > 0) {
+    coyoteFrames -= 1;
+  }
+  if (jumpBuffer > 0 && coyoteFrames > 0) {
+    executeCubeJump();
+  } else if (jumpBuffer > 0) {
+    jumpBuffer -= 1;
+  }
+  const offset = cube.worldX - cube.x;
+  for (const spike of spikes) {
+    const screenX = spike.x - offset;
+    if (screenX + spike.w < cube.x - cube.size || screenX > width) continue;
+    if (
+      cube.worldX + cube.size * 0.7 > spike.x &&
+      cube.worldX + cube.size * 0.3 < spike.x + spike.w &&
+      cube.y + cube.size > groundY - spike.h
+    ) {
+      crash();
+      return;
+    }
+  }
+  if (cube.worldX >= cubeLength) {
+    beginShipAwait();
+  }
+}
+function updateShipPhase() {
+  shipDistance += shipSettings.speed;
+  ship.vy += shipSettings.gravity;
+  if (isHolding) ship.vy -= shipSettings.thrust;
+  ship.y += ship.vy;
+  if (ship.y < 20) {
+    ship.y = 20;
+    ship.vy = 0;
+  }
+  if (ship.y + ship.h > height - 20) {
+    ship.y = height - 20 - ship.h;
+    ship.vy = 0;
+  }
+  const offset = shipDistance - ship.x;
+  for (const rect of shipObstacles) {
+    const screenX = rect.x - offset;
+    const gapHalf = rect.gapH / 2;
+    const topH = rect.gapY - gapHalf;
+    const bottomY = rect.gapY + gapHalf;
+    const topRect = { x: screenX, y: 0, w: rect.width, h: topH };
+    const bottomRect = { x: screenX, y: bottomY, w: rect.width, h: height - bottomY };
+    if (rectOverlap(ship, topRect) || rectOverlap(ship, bottomRect)) {
+      crash();
+      return;
+    }
+  }
+  if (shipDistance >= shipLength) {
+    clearLevel();
+  }
+}
+function rectOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+function update() {
+  if (state !== "running") return;
+  if (phase === "cube") updateCubePhase();
+  else if (phase === "ship") updateShipPhase();
+}
+function drawBackground() {
+  ctx.fillStyle = "#05060b";
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = "rgba(255,255,255,0.04)";
+  ctx.lineWidth = 1;
+  for (let x = 0; x < width; x += 60) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+  }
+  for (let y = 0; y < height; y += 60) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+  }
+}
+function drawCubeScene() {
+  const offset = cube.worldX - cube.x;
+  ctx.fillStyle = "#0d1b33";
+  ctx.fillRect(0, groundY, width, height - groundY);
+  ctx.fillStyle = "#222";
+  ctx.fillRect(0, groundY - 14, width, 14);
+  ctx.fillStyle = "#ff3efc";
+  spikes.forEach((spike) => {
+    const screenX = spike.x - offset;
+    if (screenX > width + 60 || screenX + spike.w < -60) return;
+    ctx.beginPath();
+    ctx.moveTo(screenX, groundY);
+    ctx.lineTo(screenX + spike.w / 2, groundY - spike.h);
+    ctx.lineTo(screenX + spike.w, groundY);
+    ctx.closePath();
+    ctx.fill();
+  });
+  const portalX = cubeLength - offset + 20;
+  if (phase !== "ship") {
+    ctx.fillStyle = "rgba(0, 200, 255, 0.5)";
+    ctx.fillRect(portalX, groundY - 130, 20, 130);
+  }
+  ctx.fillStyle = "#00f7ff";
+  ctx.fillRect(cube.x - cube.size / 2, cube.y, cube.size, cube.size);
+}
+function drawShipScene() {
+  ctx.fillStyle = "#0c0c0c";
+  ctx.fillRect(0, 0, width, 20);
+  ctx.fillRect(0, height - 40, width, 40);
+  const offset = shipDistance - ship.x;
+  ctx.fillStyle = "#4caf50";
+  shipObstacles.forEach((rect) => {
+    const screenX = rect.x - offset;
+    const gapHalf = rect.gapH / 2;
+    const topH = rect.gapY - gapHalf;
+    const bottomY = rect.gapY + gapHalf;
+    ctx.fillRect(screenX, 0, rect.width, topH);
+    ctx.fillRect(screenX, bottomY, rect.width, height - bottomY);
+  });
+  ctx.fillStyle = "#f5e146";
+  ctx.fillRect(ship.x, ship.y, ship.w, ship.h);
+}
+function drawAwaitPrompt() {
+  ctx.fillStyle = "rgba(255,255,255,0.1)";
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = "#fff";
+  ctx.font = "600 20px 'Segoe UI'";
+  ctx.textAlign = "center";
+  ctx.fillText("Double-tap to transform", width / 2, height / 2);
+}
+function draw() {
+  ctx.clearRect(0, 0, width, height);
+  drawBackground();
+  if (phase === "cube" || phase === "await_ship") {
+    drawCubeScene();
+  }
+  if (phase === "ship" || state === "clear" || state === "over") {
+    if (phase === "ship" || state === "clear") {
+      drawShipScene();
+    }
+  }
+  if (phase === "await_ship") {
+    drawAwaitPrompt();
+  }
+  if (state === "over" || state === "clear") {
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "#fff";
+    ctx.font = "700 26px 'Segoe UI'";
+    ctx.textAlign = "center";
+    ctx.fillText(state === "over" ? "Crash" : "Level Complete", width / 2, height / 2 - 10);
+    ctx.font = "400 16px 'Segoe UI'";
+    ctx.fillText("Press Start / Reset", width / 2, height / 2 + 20);
+  }
+}
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+startBtn.addEventListener("click", () => {
+  if (state === "idle") startRun();
+  else resetGame();
+});
+canvas.addEventListener("pointerdown", handlePointerDown);
+canvas.addEventListener("pointerup", handlePointerUp);
+canvas.addEventListener("pointerleave", handlePointerUp);
+document.addEventListener("keydown", handleKeyDown);
+document.addEventListener("keyup", handleKeyUp);
+resetGame();
+loop();
+</script>
+</body>
+</html>
